@@ -28,9 +28,10 @@ class TelegramChannel:
         if not msg or not msg.text:
             return
         user_id = str(msg.from_user.id)
-        log.info("TG message from %s: %s", user_id, msg.text[:80])
+        log.info("[IN]  user=%s: %s", user_id, msg.text)
 
         reply = await self.agent.handle_message(user_id, "telegram", msg.text)
+        log.info("[OUT] user=%s: %s", user_id, reply)
 
         # Split long replies
         for i in range(0, len(reply), MAX_TG_LEN):

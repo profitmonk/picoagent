@@ -9,6 +9,11 @@ DEFAULT_BLOCKED = [
     r"\bcurl\b.*\|\s*sh", r"\bwget\b.*\|\s*sh", r"\b:\(\)\s*\{",
     r"\bchmod\s+777\b", r"\bshutdown\b", r"\breboot\b",
     r"\b>/dev/sd[a-z]", r"\bnc\s+-[el]",
+    # Block secret exfiltration
+    r"\benv\b", r"\bprintenv\b", r"\bset\b(?!.*=)",
+    r"/proc/\S*environ", r"\bexport\b\s+-p",
+    r"\$\w*KEY\b", r"\$\w*TOKEN\b", r"\$\w*SECRET\b", r"\$\w*PASSWORD\b",
+    r"\bcat\b.*\.env\b", r"\bless\b.*\.env\b", r"\bmore\b.*\.env\b",
 ]
 MAX_RATE = 20  # messages per window
 RATE_WINDOW = 60  # seconds

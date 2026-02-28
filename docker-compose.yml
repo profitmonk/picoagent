@@ -4,10 +4,11 @@ services:
     container_name: picoagent
     restart: unless-stopped
 
-    # Mount config and .env
+    # Mount config only — secrets come via env vars, never as files
     volumes:
       - ./config.yaml:/home/agent/app/config.yaml:ro
-      - ./.env:/home/agent/app/.env:ro
+    env_file:
+      - .env
     environment:
       - PICOAGENT_CONFIG=/home/agent/app/config.yaml
 
