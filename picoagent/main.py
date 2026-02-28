@@ -93,7 +93,17 @@ async def run():
         await fn()
 
 
+def _require_container():
+    """Refuse to start outside a container."""
+    in_docker = os.path.exists("/.dockerenv")
+    in_container = os.path.exists("/run/.containerenv")
+    if not (in_docker or in_container):
+        log.error("Picoagent must run inside a Docker container. Use: docker compose up")
+        sys.exit(1)
+
+
 def main():
+    _require_container()
     asyncio.run(run())
 
 
