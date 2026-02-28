@@ -1,0 +1,52 @@
+# Picoagent Configuration
+# Copy to config.yaml and fill in your values.
+
+# --- LLM Providers (tried in order; first success wins) ---
+providers:
+  - type: claude
+    api_key: "sk-ant-..."          # Anthropic API key
+    model: "claude-sonnet-4-20250514"  # or claude-opus-4-20250514, claude-haiku, etc.
+
+  - type: openai
+    api_key: "sk-..."              # OpenAI API key
+    model: "gpt-4o"                # or gpt-4o-mini, gpt-3.5-turbo
+
+  # Local Ollama (no API key needed)
+  # - type: ollama
+  #   base_url: "http://localhost:11434/v1"
+  #   model: "llama3.1"
+
+  # vLLM or llama.cpp server
+  # - type: local
+  #   base_url: "http://localhost:8000/v1"
+  #   model: "meta-llama/Llama-3.1-8B-Instruct"
+
+# --- Telegram ---
+telegram:
+  token: ""                        # Bot token from @BotFather
+
+# --- WhatsApp (Meta Cloud API) ---
+whatsapp:
+  verify_token: ""                 # Your chosen webhook verify token
+  access_token: ""                 # Meta Business API access token
+  phone_number_id: ""              # Your WhatsApp phone number ID
+  port: 8080                       # Webhook listener port
+
+# --- Security ---
+security:
+  # Per-channel allowlists (empty = open to all)
+  allowlist:
+    telegram:
+      - 123456789                  # Telegram user IDs
+    whatsapp:
+      - "15551234567"              # Phone numbers (E.164 format)
+
+  # Rate limit: messages per user per window
+  rate_limit: 20
+  rate_window: 60                  # seconds
+
+  # Blocked shell command patterns (regex)
+  # Defaults are used if omitted; set to override
+  # blocked_commands:
+  #   - '\brm\s+-rf\b'
+  #   - '\bsudo\b'

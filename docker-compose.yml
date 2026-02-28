@@ -1,0 +1,33 @@
+services:
+  picoagent:
+    build: .
+    container_name: picoagent
+    restart: unless-stopped
+
+    # Mount config
+    volumes:
+      - ./config.yaml:/home/agent/app/config.yaml:ro
+    environment:
+      - PICOAGENT_CONFIG=/home/agent/app/config.yaml
+
+    # WhatsApp webhook port
+    ports:
+      - "8080:8080"
+
+    # Security constraints
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 50
+    mem_limit: 512m
+    memswap_limit: 512m
+    tmpfs:
+      - /tmp:size=64m
+
+    # Healthcheck
+    healthcheck:
+      test: ["CMD", "python", "-c", "import picoagent; print('ok')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
