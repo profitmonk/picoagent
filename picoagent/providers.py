@@ -30,6 +30,35 @@ class ClaudeProvider:
         self.client = anthropic.AsyncAnthropic(api_key=api_key)
         self.model = model
 
+    def _convert_messages(self, messages: list[dict]) -> tuple[str, list[dict]]:
+        """Convert OpenAI-style messages to Claude format."""
+        system = ""
+        conv = []
+        for m in messages:
+            if m["role"] == "system":
+                system = m["content"]
+            elif m["role"] == "assistant":
+                # Convert assistant messages with tool_calls to Claude content blocks
+                content = []
+                if m.get("content"):
+                    content.append({"type": "text", "text": m["content"]})
+                for tc in m.get("tool_calls", []):
+                    fn = tc["function"]
+                    args = json.loads(fn["arguments"]) if isinstance(fn["arguments"], str) else fn["arguments"]
+                    content.append({"type": "tool_use", "id": tc["id"], "name": fn["name"], "input": args})
+                conv.append({"role": "assistant", "content": content or m.get("content", "")})
+            elif m["role"] == "tool":
+                # Convert tool results: Claude expects them inside a user message
+                tool_result = {"type": "tool_result", "tool_use_id": m["tool_call_id"], "content": m["content"]}
+                # Merge consecutive tool results into one user message
+                if conv and conv[-1]["role"] == "user" and isinstance(conv[-1]["content"], list) and conv[-1]["content"] and conv[-1]["content"][0].get("type") == "tool_result":
+                    conv[-1]["content"].append(tool_result)
+                else:
+                    conv.append({"role": "user", "content": [tool_result]})
+            else:
+                conv.append({"role": m["role"], "content": m["content"]})
+        return system, conv
+
     async def complete(self, messages: list[dict], tools: list[dict]) -> LLMResponse:
         # Convert OpenAI-style tools to Claude format
         claude_tools = []
@@ -41,14 +70,7 @@ class ClaudeProvider:
                 "input_schema": fn["parameters"],
             })
 
-        # Convert messages: separate system from conversation
-        system = ""
-        conv = []
-        for m in messages:
-            if m["role"] == "system":
-                system = m["content"]
-            else:
-                conv.append(m)
+        system, conv = self._convert_messages(messages)
 
         resp = await self.client.messages.create(
             model=self.model, max_tokens=2048, system=system,

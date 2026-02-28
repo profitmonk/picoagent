@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import os
+import re
 import signal
 import sys
 
@@ -17,10 +18,31 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname
 log = logging.getLogger(__name__)
 
 
+def _load_dotenv():
+    """Load .env file into os.environ if present."""
+    env_path = os.path.join(os.path.dirname(os.environ.get("PICOAGENT_CONFIG", "config.yaml")), ".env")
+    if not os.path.exists(env_path):
+        env_path = ".env"
+    if os.path.exists(env_path):
+        with open(env_path) as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    key, _, val = line.partition("=")
+                    os.environ.setdefault(key.strip(), val.strip().strip('"').strip("'"))
+
+
+def _resolve_env_vars(text: str) -> str:
+    """Replace ${VAR} with environment variable values."""
+    return re.sub(r"\$\{(\w+)\}", lambda m: os.environ.get(m.group(1), m.group(0)), text)
+
+
 def load_config() -> dict:
+    _load_dotenv()
     path = os.environ.get("PICOAGENT_CONFIG", "config.yaml")
     with open(path) as f:
-        return yaml.safe_load(f)
+        raw = f.read()
+    return yaml.safe_load(_resolve_env_vars(raw))
 
 
 async def run():
