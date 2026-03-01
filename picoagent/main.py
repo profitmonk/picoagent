@@ -57,7 +57,12 @@ async def run():
     # Telegram
     tg = cfg.get("telegram", {})
     if tg.get("token"):
-        ch = TelegramChannel(tg["token"], agent)
+        ch = TelegramChannel(
+            token=tg["token"],
+            agent=agent,
+            webhook_url=tg.get("webhook_url"),
+            port=tg.get("webhook_port", 8443),
+        )
         channels.append(ch.start())
         stop_fns.append(ch.stop)
 

@@ -12,8 +12,9 @@ services:
     environment:
       - PICOAGENT_CONFIG=/home/agent/app/config.yaml
 
-    # WhatsApp webhook port
+    # Webhook ports: Telegram (8443) + WhatsApp (8080)
     ports:
+      - "8443:8443"
       - "8080:8080"
 
     # Security constraints

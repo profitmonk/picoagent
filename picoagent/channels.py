@@ -1,5 +1,6 @@
-"""Channels: Telegram (polling) and WhatsApp (webhook)."""
+"""Channels: Telegram (webhook) and WhatsApp (webhook)."""
 
+import json
 import logging
 
 import aiohttp
@@ -15,13 +16,17 @@ MAX_TG_LEN = 4096
 
 
 class TelegramChannel:
-    """Telegram bot using polling mode."""
+    """Telegram bot using webhook mode (or polling as fallback)."""
 
-    def __init__(self, token: str, agent: Agent):
+    def __init__(self, token: str, agent: Agent, webhook_url: str | None = None,
+                 port: int = 8443):
         self.token = token
         self.agent = agent
+        self.webhook_url = webhook_url
+        self.port = port
         self.app = ApplicationBuilder().token(token).build()
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._on_message))
+        self._runner: web.AppRunner | None = None
 
     async def _on_message(self, update: Update, context):
         msg = update.message
@@ -37,14 +42,46 @@ class TelegramChannel:
         for i in range(0, len(reply), MAX_TG_LEN):
             await msg.reply_text(reply[i:i + MAX_TG_LEN])
 
+    async def _handle_webhook(self, request: web.Request) -> web.Response:
+        """Handle incoming Telegram webhook POST."""
+        data = await request.json()
+        update = Update.de_json(data, self.app.bot)
+        await self.app.process_update(update)
+        return web.Response(status=200)
+
     async def start(self):
-        log.info("Starting Telegram polling...")
         await self.app.initialize()
         await self.app.start()
-        await self.app.updater.start_polling()
+
+        if self.webhook_url:
+            # Webhook mode
+            webhook_path = f"/telegram/{self.token.split(':')[0]}"
+            full_url = f"{self.webhook_url}{webhook_path}"
+
+            # Set webhook with Telegram
+            await self.app.bot.set_webhook(url=full_url)
+            log.info("Telegram webhook set: %s", full_url)
+
+            # Start aiohttp server to receive webhooks
+            srv = web.Application()
+            srv.router.add_post(webhook_path, self._handle_webhook)
+            self._runner = web.AppRunner(srv)
+            await self._runner.setup()
+            site = web.TCPSite(self._runner, "0.0.0.0", self.port)
+            await site.start()
+            log.info("Telegram webhook listener on port %d", self.port)
+        else:
+            # Fallback to polling
+            log.info("No webhook URL configured, using polling...")
+            await self.app.updater.start_polling()
 
     async def stop(self):
-        await self.app.updater.stop()
+        if self.webhook_url:
+            await self.app.bot.delete_webhook()
+            if self._runner:
+                await self._runner.cleanup()
+        else:
+            await self.app.updater.stop()
         await self.app.stop()
         await self.app.shutdown()
 
