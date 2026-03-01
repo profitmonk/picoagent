@@ -24,6 +24,8 @@ providers:
 # --- Telegram ---
 telegram:
   token: ""                        # Bot token from @BotFather
+  webhook_url: ""                  # ngrok/Cloudflare public URL (leave empty for polling mode)
+  webhook_port: 8443               # Port for webhook listener
 
 # --- WhatsApp (Meta Cloud API) ---
 whatsapp:

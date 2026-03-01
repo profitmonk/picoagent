@@ -1,6 +1,6 @@
 # Picoagent
 
-Lightweight, secure AI agent (~600 lines of Python) that routes messages from Telegram and WhatsApp to cloud AI (Claude, ChatGPT) or local models (Ollama, vLLM), with shell execution and web browsing capabilities. Runs in a Docker container on Mac or Raspberry Pi.
+Lightweight, secure AI agent (~680 lines of Python) that routes messages from Telegram and WhatsApp to cloud AI (Claude, ChatGPT) or local models (Ollama, vLLM), with shell execution and web browsing capabilities. Runs in a Docker container on Mac or Raspberry Pi.
 
 ## Architecture
 
