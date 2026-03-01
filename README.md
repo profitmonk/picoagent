@@ -1,6 +1,6 @@
 # Picoagent
 
-Lightweight, secure AI agent (~680 lines of Python) that routes messages from Telegram and WhatsApp to cloud AI (Claude, ChatGPT) or local models (Ollama, vLLM), with shell execution and web browsing capabilities. Runs in a Docker container on Mac or Raspberry Pi.
+Lightweight, secure AI agent (~750 lines of Python) that routes messages from Telegram and WhatsApp to cloud AI (Claude, ChatGPT) or local models (Ollama, vLLM), with shell execution and web browsing capabilities. Persistent conversation memory via SQLite. Runs in a Docker container on Mac or Raspberry Pi.
 
 ## Architecture
 
@@ -14,14 +14,15 @@ ngrok tunnel (public URL)
 Docker container (picoagent)
      |
 Agent (ReAct Loop) --> SecurityGate
-  /       |        \
-Providers  ShellTool  WebTool
+  /    |     \    \
+Providers Shell Web  Memory (SQLite)
  /   |   \
 Claude OpenAI Ollama
 ```
 
-- **Webhook mode** — Telegram pushes messages instantly via ngrok tunnel (no polling)
-- **ReAct loop** with per-user conversation memory (sliding window)
+- **Webhook mode** — Telegram pushes messages instantly via ngrok tunnel (polling fallback available)
+- **Persistent memory** — SQLite-backed conversation history survives container restarts
+- **ReAct loop** with per-user conversation memory (20-message sliding window)
 - **Provider chain** with automatic fallback (Claude -> OpenAI -> local)
 - **Docker-only execution** — refuses to start outside a container
 - **6-layer security**: user allowlist, rate limiting, command blocklist, secret exfiltration prevention, container isolation, execution limits
@@ -59,8 +60,9 @@ cp config.example.yaml config.yaml
 ### Daily usage
 
 ```bash
-./start.sh      # Start ngrok + Docker (one command)
-./stop.sh       # Stop everything
+./start.sh           # Start ngrok + Docker (one command)
+./stop.sh            # Stop everything, keep conversation history
+./stop.sh --wipe     # Stop everything + delete all conversation history
 ```
 
 ### Manage the container
@@ -129,11 +131,26 @@ The agent can use two tools via the ReAct loop:
 | Container isolation | Non-root user, all capabilities dropped, 50 PID limit, 512MB memory |
 | Execution limits | 30s shell timeout, 4000 char truncation, max 5 tool rounds |
 
+## Persistent Memory
+
+Conversation history is stored in SQLite inside a Docker named volume:
+
+```
+Docker volume: picoagent_picoagent-data
+  └── /data/picoagent.db
+       └── messages (conv_key, role, content, tool_calls, timestamp)
+```
+
+- Survives container restarts and rebuilds
+- 20-message sliding window per user
+- Isolated inside Docker — not accessible from the host filesystem
+- Wipe with: `./stop.sh --wipe`
+
 ## Tests
 
 ```bash
 pip install -r requirements.txt
-python -m pytest tests/ -v    # 45 tests covering all modules
+python -m pytest tests/ -v    # 48 tests covering all modules
 ```
 
 ## Project Structure
@@ -143,19 +160,21 @@ picoagent/
 ├── picoagent/
 │   ├── __init__.py       - Version string
 │   ├── main.py           - Config loading, .env support, Docker enforcement, startup
-│   ├── agent.py          - ReAct loop, conversation memory, tool dispatch
+│   ├── agent.py          - ReAct loop, tool dispatch, uses Memory for persistence
+│   ├── memory.py         - SQLite-backed conversation store (save/load/trim)
 │   ├── providers.py      - Claude + OpenAI-compatible provider chain with fallback
-│   ├── channels.py       - Telegram (webhook) + WhatsApp (webhook)
+│   ├── channels.py       - Telegram (webhook + polling fallback) + WhatsApp (webhook)
 │   ├── tools.py          - Shell executor + web page fetcher
 │   └── security.py       - Allowlist, blocklist, rate limiting, secret protection
 ├── tests/
-│   └── test_picoagent.py - 45 tests
+│   └── test_picoagent.py - 48 tests
+├── CLAUDE.md             - Project context and conventions
 ├── config.example.yaml   - Annotated config template
-├── Dockerfile            - python:3.11-slim, non-root user
-├── docker-compose.yml    - Security constraints (cap_drop, pids, mem limit)
+├── Dockerfile            - python:3.11-slim, non-root user, /data volume
+├── docker-compose.yml    - Security constraints, named volume for persistence
 ├── requirements.txt      - pyyaml, aiohttp, python-telegram-bot, anthropic, openai
 ├── start.sh              - Launch ngrok + Docker in one command
-└── stop.sh               - Tear down everything
+└── stop.sh               - Tear down everything (--wipe to delete history)
 ```
 
 ## License
