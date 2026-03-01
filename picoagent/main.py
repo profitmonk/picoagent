@@ -11,6 +11,7 @@ import yaml
 
 from .agent import Agent
 from .channels import TelegramChannel, WhatsAppChannel
+from .memory import Memory
 from .providers import ProviderChain
 from .security import SecurityGate
 
@@ -49,7 +50,9 @@ async def run():
     cfg = load_config()
     security = SecurityGate.from_config(cfg)
     providers = ProviderChain.from_config(cfg)
-    agent = Agent(providers, security)
+    db_path = cfg.get("memory", {}).get("db_path", "/data/picoagent.db")
+    memory = Memory(db_path)
+    agent = Agent(providers, security, memory)
 
     channels = []
     stop_fns = []

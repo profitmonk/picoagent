@@ -4,9 +4,10 @@ services:
     container_name: picoagent
     restart: unless-stopped
 
-    # Mount config only — secrets come via env vars, never as files
+    # Config (read-only) + persistent memory volume
     volumes:
       - ./config.yaml:/home/agent/app/config.yaml:ro
+      - picoagent-data:/data
     env_file:
       - .env
     environment:
@@ -34,3 +35,6 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+
+volumes:
+  picoagent-data:

@@ -219,27 +219,63 @@ class TestProviderFallback(unittest.TestCase):
         self.assertIn("All providers failed", str(ctx.exception))
 
 
+# ── Memory tests ────────────────────────────────────────────────
+
+from picoagent.memory import Memory
+
+
+class TestMemory(unittest.TestCase):
+    def setUp(self):
+        self.mem = Memory(":memory:")
+
+    def test_save_and_load(self):
+        self.mem.save("test:1", {"role": "user", "content": "hello"})
+        self.mem.save("test:1", {"role": "assistant", "content": "hi"})
+        msgs = self.mem.load("test:1")
+        self.assertEqual(len(msgs), 2)
+        self.assertEqual(msgs[0]["content"], "hello")
+        self.assertEqual(msgs[1]["content"], "hi")
+
+    def test_separate_conversations(self):
+        self.mem.save("test:1", {"role": "user", "content": "from user1"})
+        self.mem.save("test:2", {"role": "user", "content": "from user2"})
+        self.assertEqual(len(self.mem.load("test:1")), 1)
+        self.assertEqual(len(self.mem.load("test:2")), 1)
+
+    def test_trim_keeps_window(self):
+        for i in range(30):
+            self.mem.save("test:1", {"role": "user", "content": f"msg {i}"})
+        self.mem.trim("test:1")
+        msgs = self.mem.load("test:1")
+        self.assertEqual(len(msgs), 20)
+        self.assertEqual(msgs[0]["content"], "msg 10")
+
+    def test_tool_calls_persisted(self):
+        self.mem.save("test:1", {
+            "role": "assistant", "content": "",
+            "tool_calls": [{"id": "tc1", "type": "function",
+                            "function": {"name": "shell", "arguments": "{}"}}],
+        })
+        msgs = self.mem.load("test:1")
+        self.assertEqual(len(msgs[0]["tool_calls"]), 1)
+
+    def test_tool_result_persisted(self):
+        self.mem.save("test:1", {"role": "tool", "tool_call_id": "tc1", "content": "output"})
+        msgs = self.mem.load("test:1")
+        self.assertEqual(msgs[0]["tool_call_id"], "tc1")
+
+
 # ── Agent tests ─────────────────────────────────────────────────
 
-from picoagent.agent import Agent, Conversation
+from picoagent.agent import Agent
 
 
-class TestConversation(unittest.TestCase):
-    def test_append_and_window(self):
-        conv = Conversation()
-        for i in range(25):
-            conv.append("user", f"msg {i}")
-        # Window is 20
-        self.assertEqual(len(conv.messages), 20)
-        self.assertEqual(conv.messages[0]["content"], "msg 5")
-
-    def test_to_messages_includes_system(self):
-        conv = Conversation()
-        conv.append("user", "hello")
-        msgs = conv.to_messages()
-        self.assertEqual(msgs[0]["role"], "system")
-        self.assertEqual(msgs[1]["role"], "user")
-        self.assertEqual(msgs[1]["content"], "hello")
+def _make_agent(mock_chain, security=None):
+    """Helper to create Agent with in-memory SQLite."""
+    if security is None:
+        security = SecurityGate.from_config({})
+    mem = Memory(":memory:")
+    return Agent(mock_chain, security, mem)
 
 
 class TestAgentReactLoop(unittest.TestCase):
@@ -247,8 +283,7 @@ class TestAgentReactLoop(unittest.TestCase):
         """LLM returns text with no tool calls -> returned directly."""
         mock_chain = AsyncMock()
         mock_chain.complete = AsyncMock(return_value=LLMResponse(text="Hello!"))
-        security = SecurityGate.from_config({})
-        agent = Agent(mock_chain, security)
+        agent = _make_agent(mock_chain)
 
         result = asyncio.run(agent.handle_message("user1", "telegram", "hi"))
         self.assertEqual(result, "Hello!")
@@ -256,17 +291,13 @@ class TestAgentReactLoop(unittest.TestCase):
     def test_tool_call_then_response(self):
         """LLM calls a tool, gets result, then returns text."""
         mock_chain = AsyncMock()
-        # First call: LLM wants to use shell tool
         tool_response = LLMResponse(
             text=None,
             tool_calls=[ToolCall(id="tc1", name="shell", arguments={"command": "echo test_output"})]
         )
-        # Second call: LLM returns final text
         text_response = LLMResponse(text="The output was: test_output")
-
         mock_chain.complete = AsyncMock(side_effect=[tool_response, text_response])
-        security = SecurityGate.from_config({})
-        agent = Agent(mock_chain, security)
+        agent = _make_agent(mock_chain)
 
         result = asyncio.run(agent.handle_message("user1", "telegram", "run echo"))
         self.assertEqual(result, "The output was: test_output")
@@ -275,17 +306,13 @@ class TestAgentReactLoop(unittest.TestCase):
     def test_blocked_command_returns_error(self):
         """LLM tries to run a blocked command -> blocked by security."""
         mock_chain = AsyncMock()
-        # First call: LLM tries rm -rf
         tool_response = LLMResponse(
             text=None,
             tool_calls=[ToolCall(id="tc1", name="shell", arguments={"command": "rm -rf /"})]
         )
-        # Second call: LLM responds after seeing block message
         text_response = LLMResponse(text="That command was blocked.")
-
         mock_chain.complete = AsyncMock(side_effect=[tool_response, text_response])
-        security = SecurityGate.from_config({})
-        agent = Agent(mock_chain, security)
+        agent = _make_agent(mock_chain)
 
         result = asyncio.run(agent.handle_message("user1", "telegram", "delete everything"))
         self.assertEqual(result, "That command was blocked.")
@@ -293,14 +320,12 @@ class TestAgentReactLoop(unittest.TestCase):
     def test_max_rounds_safety(self):
         """Agent stops after MAX_ROUNDS tool loops."""
         mock_chain = AsyncMock()
-        # Always return a tool call (infinite loop attempt)
         tool_response = LLMResponse(
             text=None,
             tool_calls=[ToolCall(id="tc1", name="shell", arguments={"command": "pwd"})]
         )
         mock_chain.complete = AsyncMock(return_value=tool_response)
-        security = SecurityGate.from_config({})
-        agent = Agent(mock_chain, security)
+        agent = _make_agent(mock_chain)
 
         result = asyncio.run(agent.handle_message("user1", "telegram", "loop forever"))
         self.assertIn("maximum tool rounds", result)
@@ -309,7 +334,7 @@ class TestAgentReactLoop(unittest.TestCase):
         """User not in allowlist gets rejected before any LLM call."""
         mock_chain = AsyncMock()
         security = SecurityGate(allowed_users={"telegram": {"123"}})
-        agent = Agent(mock_chain, security)
+        agent = _make_agent(mock_chain, security)
 
         result = asyncio.run(agent.handle_message("999", "telegram", "hi"))
         self.assertIn("allowlist", result)
@@ -320,7 +345,7 @@ class TestAgentReactLoop(unittest.TestCase):
         mock_chain = AsyncMock()
         mock_chain.complete = AsyncMock(return_value=LLMResponse(text="ok"))
         security = SecurityGate(rate_limit=2, rate_window=60)
-        agent = Agent(mock_chain, security)
+        agent = _make_agent(mock_chain, security)
 
         asyncio.run(agent.handle_message("user1", "telegram", "msg1"))
         asyncio.run(agent.handle_message("user1", "telegram", "msg2"))
@@ -331,13 +356,12 @@ class TestAgentReactLoop(unittest.TestCase):
         """Same user's conversation context is maintained across messages."""
         mock_chain = AsyncMock()
         mock_chain.complete = AsyncMock(return_value=LLMResponse(text="reply"))
-        security = SecurityGate.from_config({})
-        agent = Agent(mock_chain, security)
+        agent = _make_agent(mock_chain)
 
         asyncio.run(agent.handle_message("user1", "telegram", "first"))
         asyncio.run(agent.handle_message("user1", "telegram", "second"))
 
-        # Check that second call includes both messages
+        # Check that second call includes both user messages
         second_call_msgs = mock_chain.complete.call_args_list[1][0][0]
         user_msgs = [m for m in second_call_msgs if m["role"] == "user"]
         self.assertEqual(len(user_msgs), 2)
@@ -351,8 +375,7 @@ class TestAgentReactLoop(unittest.TestCase):
         )
         text_response = LLMResponse(text="That tool doesn't exist.")
         mock_chain.complete = AsyncMock(side_effect=[tool_response, text_response])
-        security = SecurityGate.from_config({})
-        agent = Agent(mock_chain, security)
+        agent = _make_agent(mock_chain)
 
         result = asyncio.run(agent.handle_message("user1", "telegram", "use magic tool"))
         self.assertEqual(result, "That tool doesn't exist.")

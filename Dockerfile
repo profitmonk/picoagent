@@ -5,8 +5,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl wget jq git && \
     rm -rf /var/lib/apt/lists/*
 
-# Non-root user
-RUN useradd -m -s /bin/bash agent
+# Non-root user + persistent data directory
+RUN useradd -m -s /bin/bash agent && mkdir -p /data && chown agent:agent /data
 WORKDIR /home/agent/app
 
 # Install Python deps

@@ -1,10 +1,9 @@
-"""Agent: ReAct loop with conversation memory and tool dispatch."""
+"""Agent: ReAct loop with persistent conversation memory and tool dispatch."""
 
 import json
 import logging
-from collections import defaultdict
-from dataclasses import dataclass, field
 
+from .memory import Memory
 from .providers import ProviderChain
 from .security import SecurityGate
 from .tools import TOOL_DEFS, TOOL_RUNNERS
@@ -12,46 +11,30 @@ from .tools import TOOL_DEFS, TOOL_RUNNERS
 log = logging.getLogger(__name__)
 
 MAX_ROUNDS = 5
-MEMORY_WINDOW = 20  # messages kept per conversation
 SYSTEM_PROMPT = (
     "You are Picoagent, a helpful AI assistant. You can run shell commands and fetch web pages. "
     "Be concise. When using tools, explain what you're doing briefly."
 )
 
 
-@dataclass
-class Conversation:
-    messages: list[dict] = field(default_factory=list)
-
-    def append(self, role: str, content: str):
-        self.messages.append({"role": role, "content": content})
-        if len(self.messages) > MEMORY_WINDOW:
-            self.messages = self.messages[-MEMORY_WINDOW:]
-
-    def append_tool_result(self, tool_call_id: str, content: str):
-        self.messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": content})
-        if len(self.messages) > MEMORY_WINDOW:
-            self.messages = self.messages[-MEMORY_WINDOW:]
-
-    def append_assistant_with_tools(self, text: str | None, tool_calls: list[dict]):
-        msg: dict = {"role": "assistant", "content": text or ""}
-        if tool_calls:
-            msg["tool_calls"] = tool_calls
-        self.messages.append(msg)
-        if len(self.messages) > MEMORY_WINDOW:
-            self.messages = self.messages[-MEMORY_WINDOW:]
-
-    def to_messages(self) -> list[dict]:
-        return [{"role": "system", "content": SYSTEM_PROMPT}] + list(self.messages)
-
-
 class Agent:
-    """Core agent with ReAct loop."""
+    """Core agent with ReAct loop and persistent memory."""
 
-    def __init__(self, provider_chain: ProviderChain, security: SecurityGate):
+    def __init__(self, provider_chain: ProviderChain, security: SecurityGate,
+                 memory: Memory):
         self.providers = provider_chain
         self.security = security
-        self.conversations: dict[str, Conversation] = defaultdict(Conversation)
+        self.memory = memory
+
+    def _conv_key(self, channel: str, user_id: str) -> str:
+        return f"{channel}:{user_id}"
+
+    def _build_messages(self, conv_key: str) -> list[dict]:
+        history = self.memory.load(conv_key)
+        return [{"role": "system", "content": SYSTEM_PROMPT}] + history
+
+    def _save(self, conv_key: str, msg: dict):
+        self.memory.save(conv_key, msg)
 
     async def handle_message(self, user_id: str, channel: str, text: str) -> str:
         # Security check
@@ -59,15 +42,17 @@ class Agent:
         if err:
             return err
 
-        conv = self.conversations[f"{channel}:{user_id}"]
-        conv.append("user", text)
+        conv_key = self._conv_key(channel, user_id)
+        self._save(conv_key, {"role": "user", "content": text})
 
         for round_num in range(MAX_ROUNDS):
-            resp = await self.providers.complete(conv.to_messages(), TOOL_DEFS)
+            messages = self._build_messages(conv_key)
+            resp = await self.providers.complete(messages, TOOL_DEFS)
 
             if not resp.tool_calls:
                 reply = resp.text or "(no response)"
-                conv.append("assistant", reply)
+                self._save(conv_key, {"role": "assistant", "content": reply})
+                self.memory.trim(conv_key)
                 return reply
 
             # Record assistant message with tool calls
@@ -76,14 +61,16 @@ class Agent:
                  "function": {"name": tc.name, "arguments": json.dumps(tc.arguments)}}
                 for tc in resp.tool_calls
             ]
-            conv.append_assistant_with_tools(resp.text, tc_dicts)
+            assistant_msg = {"role": "assistant", "content": resp.text or "", "tool_calls": tc_dicts}
+            self._save(conv_key, assistant_msg)
 
             # Execute each tool call
             for tc in resp.tool_calls:
                 result = await self._execute_tool(tc.name, tc.arguments)
-                conv.append_tool_result(tc.id, result)
+                self._save(conv_key, {"role": "tool", "tool_call_id": tc.id, "content": result})
                 log.info("Tool %s -> %s chars", tc.name, len(result))
 
+        self.memory.trim(conv_key)
         return "[Reached maximum tool rounds. Please try a simpler request.]"
 
     async def _execute_tool(self, name: str, arguments: dict) -> str:
