@@ -3,6 +3,7 @@ __pycache__/
 .pytest_cache/
 config.yaml
 .env
+conversation.log
 *.egg-info/
 dist/
 build/
