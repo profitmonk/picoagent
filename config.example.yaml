@@ -11,10 +11,10 @@ providers:
     api_key: "sk-..."              # OpenAI API key
     model: "gpt-4o"                # or gpt-4o-mini, gpt-3.5-turbo
 
-  # Local Ollama (no API key needed)
-  # - type: ollama
-  #   base_url: "http://localhost:11434/v1"
-  #   model: "llama3.1"
+  # Local Ollama — enables smart routing (simple queries handled locally for free)
+  - type: ollama
+    base_url: "http://host.docker.internal:11434/v1"  # Docker -> host Ollama
+    model: "llama3.2"                                  # or llama3.1, mistral, etc.
 
   # vLLM or llama.cpp server
   # - type: local

@@ -381,6 +381,144 @@ class TestAgentReactLoop(unittest.TestCase):
         self.assertEqual(result, "That tool doesn't exist.")
 
 
+# ── Router tests ───────────────────────────────────────────────
+
+from picoagent.router import classify, SmartRouter
+
+
+class TestRouterClassify(unittest.TestCase):
+    def test_greeting_is_simple(self):
+        self.assertEqual(classify("hello"), "simple")
+        self.assertEqual(classify("Hi there"), "simple")
+        self.assertEqual(classify("good morning"), "simple")
+
+    def test_thanks_is_simple(self):
+        self.assertEqual(classify("thanks"), "simple")
+        self.assertEqual(classify("thank you"), "simple")
+
+    def test_short_yes_no_is_simple(self):
+        self.assertEqual(classify("yes"), "simple")
+        self.assertEqual(classify("ok"), "simple")
+        self.assertEqual(classify("nope"), "simple")
+
+    def test_joke_is_simple(self):
+        self.assertEqual(classify("tell me a joke"), "simple")
+
+    def test_code_request_is_complex(self):
+        self.assertEqual(classify("write a Python function to sort a list"), "complex")
+        self.assertEqual(classify("create a script to parse CSV files"), "complex")
+
+    def test_explain_is_complex(self):
+        self.assertEqual(classify("explain how async/await works in Python"), "complex")
+
+    def test_debug_is_complex(self):
+        self.assertEqual(classify("debug this code that has a bug"), "complex")
+
+    def test_code_block_is_complex(self):
+        self.assertEqual(classify("```python\nprint('hello')\n```"), "complex")
+
+    def test_shell_command_is_tool(self):
+        self.assertEqual(classify("run ls -la"), "tool")
+        self.assertEqual(classify("execute the shell command"), "tool")
+
+    def test_directory_is_tool(self):
+        self.assertEqual(classify("what directory am I in"), "tool")
+        self.assertEqual(classify("list files in current folder"), "tool")
+
+    def test_web_fetch_is_tool(self):
+        self.assertEqual(classify("fetch the website example.com"), "tool")
+
+    def test_architecture_is_complex(self):
+        self.assertEqual(classify("what design pattern should I use for this"), "complex")
+
+    def test_api_question_is_complex(self):
+        self.assertEqual(classify("how do I use the Docker API"), "complex")
+
+    def test_long_message_is_complex(self):
+        long_msg = "word " * 55
+        self.assertEqual(classify(long_msg), "complex")
+
+
+class TestSmartRouterRouting(unittest.TestCase):
+    def test_simple_uses_local(self):
+        cloud = AsyncMock()
+        cloud.complete = AsyncMock(return_value=LLMResponse(text="cloud"))
+        local = AsyncMock()
+        local.complete = AsyncMock(return_value=LLMResponse(text="local"))
+
+        router = SmartRouter(cloud_chain=cloud, local_chain=local)
+        result = asyncio.run(router.complete(
+            [{"role": "user", "content": "hello"}], []
+        ))
+        self.assertEqual(result.text, "local")
+        cloud.complete.assert_not_called()
+
+    def test_complex_uses_cloud(self):
+        cloud = AsyncMock()
+        cloud.complete = AsyncMock(return_value=LLMResponse(text="cloud"))
+        local = AsyncMock()
+        local.complete = AsyncMock(return_value=LLMResponse(text="local"))
+
+        router = SmartRouter(cloud_chain=cloud, local_chain=local)
+        result = asyncio.run(router.complete(
+            [{"role": "user", "content": "explain how async/await works in Python"}], []
+        ))
+        self.assertEqual(result.text, "cloud")
+        local.complete.assert_not_called()
+
+    def test_tool_uses_cloud(self):
+        cloud = AsyncMock()
+        cloud.complete = AsyncMock(return_value=LLMResponse(text="cloud"))
+        local = AsyncMock()
+        local.complete = AsyncMock(return_value=LLMResponse(text="local"))
+
+        router = SmartRouter(cloud_chain=cloud, local_chain=local)
+        result = asyncio.run(router.complete(
+            [{"role": "user", "content": "run pwd"}],
+            [{"function": {"name": "shell"}}],  # tools present
+        ))
+        self.assertEqual(result.text, "cloud")
+
+    def test_local_failure_escalates_to_cloud(self):
+        cloud = AsyncMock()
+        cloud.complete = AsyncMock(return_value=LLMResponse(text="cloud"))
+        local = AsyncMock()
+        local.complete = AsyncMock(side_effect=Exception("connection refused"))
+
+        router = SmartRouter(cloud_chain=cloud, local_chain=local)
+        result = asyncio.run(router.complete(
+            [{"role": "user", "content": "hello"}], []
+        ))
+        self.assertEqual(result.text, "cloud")
+
+    def test_no_local_uses_cloud_for_all(self):
+        cloud = AsyncMock()
+        cloud.complete = AsyncMock(return_value=LLMResponse(text="cloud"))
+
+        router = SmartRouter(cloud_chain=cloud, local_chain=None)
+        result = asyncio.run(router.complete(
+            [{"role": "user", "content": "hello"}], []
+        ))
+        self.assertEqual(result.text, "cloud")
+
+    def test_from_config_mixed_providers(self):
+        cfg = {"providers": [
+            {"type": "claude", "api_key": "test-key"},
+            {"type": "ollama", "base_url": "http://localhost:11434/v1", "model": "llama3.2"},
+        ]}
+        router = SmartRouter.from_config(cfg)
+        self.assertIsNotNone(router.cloud)
+        self.assertIsNotNone(router.local)
+
+    def test_from_config_cloud_only(self):
+        cfg = {"providers": [
+            {"type": "claude", "api_key": "test-key"},
+        ]}
+        router = SmartRouter.from_config(cfg)
+        self.assertIsNotNone(router.cloud)
+        self.assertIsNone(router.local)
+
+
 # ── Config loading test ─────────────────────────────────────────
 
 import yaml
@@ -404,7 +542,14 @@ class TestConfigLoading(unittest.TestCase):
         with open("config.example.yaml") as f:
             cfg = yaml.safe_load(f)
         chain = ProviderChain.from_config(cfg)
-        self.assertEqual(len(chain.providers), 2)
+        self.assertEqual(len(chain.providers), 3)
+
+    def test_smart_router_from_example_config(self):
+        with open("config.example.yaml") as f:
+            cfg = yaml.safe_load(f)
+        router = SmartRouter.from_config(cfg)
+        self.assertIsNotNone(router.cloud)
+        self.assertIsNotNone(router.local)
 
 
 if __name__ == "__main__":

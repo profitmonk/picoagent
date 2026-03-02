@@ -14,12 +14,14 @@ ngrok tunnel (public URL)
 Docker container (picoagent)
      |
 Agent (ReAct Loop) --> SecurityGate
-  /    |     \    \
-Providers Shell Web  Memory (SQLite)
- /   |   \
-Claude OpenAI Ollama
+     |                       \
+SmartRouter               Memory (SQLite)
+  /       \
+Cloud     Local + Shell + Web
+(Claude)  (Ollama)
 ```
 
+- **Smart routing** — classifies messages and routes simple queries to Ollama (free/fast), complex ones to Claude (quality), with auto-escalation
 - **Webhook mode** — Telegram pushes messages instantly via ngrok tunnel (polling fallback available)
 - **Persistent memory** — SQLite-backed conversation history survives container restarts
 - **ReAct loop** with per-user conversation memory (20-message sliding window)
@@ -34,6 +36,7 @@ Claude OpenAI Ollama
 - [ngrok](https://ngrok.com/) (free account) — `brew install ngrok`
 - A Telegram bot token from [@BotFather](https://t.me/botfather)
 - An Anthropic API key from [console.anthropic.com](https://console.anthropic.com)
+- [Ollama](https://ollama.com/) (optional, for smart routing) — `brew install ollama`
 
 ### Setup
 
@@ -90,12 +93,11 @@ providers:
   - type: claude
     api_key: "${ANTHROPIC_API_KEY}"
     model: "claude-sonnet-4-20250514"
-  # - type: openai
-  #   api_key: "${OPENAI_API_KEY}"
-  #   model: "gpt-4o"
-  # - type: ollama
-  #   base_url: "http://host.docker.internal:11434/v1"
-  #   model: "llama3.1"
+
+  # Add Ollama for smart routing (simple queries handled locally for free)
+  - type: ollama
+    base_url: "http://host.docker.internal:11434/v1"
+    model: "llama3.2"
 
 telegram:
   token: "${TELEGRAM_BOT_TOKEN}"
@@ -109,6 +111,22 @@ security:
   rate_limit: 20
   rate_window: 60
 ```
+
+## Smart Routing
+
+When both cloud (Claude) and local (Ollama) providers are configured, the agent uses intelligent routing:
+
+| Message Type | Example | Routed To | Why |
+|-------------|---------|-----------|-----|
+| Greetings & simple chat | "hello", "thanks", "yes" | Ollama (local) | Free, fast, no API cost |
+| Factual Q&A | "tell me a joke", "define entropy" | Ollama (local) | Simple enough for local model |
+| Code/analysis | "write a Python sort function" | Claude (cloud) | Needs strong reasoning |
+| Tool use | "what directory am I in?" | Claude (cloud) | Requires function calling |
+| Complex reasoning | "explain async/await step by step" | Claude (cloud) | Needs depth and accuracy |
+
+**Auto-escalation**: If Ollama fails or returns empty, the request automatically escalates to Claude.
+
+**Setup**: Install Ollama (`brew install ollama`), pull a model (`ollama pull llama3.2`), start it (`ollama serve`), and add the Ollama provider to your config.yaml. The router activates automatically when local providers are present.
 
 ## Tools
 
@@ -150,7 +168,7 @@ Docker volume: picoagent_picoagent-data
 
 ```bash
 pip install -r requirements.txt
-python -m pytest tests/ -v    # 48 tests covering all modules
+python -m pytest tests/ -v    # 70 tests covering all modules
 ```
 
 ## Project Structure
@@ -162,12 +180,13 @@ picoagent/
 │   ├── main.py           - Config loading, .env support, Docker enforcement, startup
 │   ├── agent.py          - ReAct loop, tool dispatch, uses Memory for persistence
 │   ├── memory.py         - SQLite-backed conversation store (save/load/trim)
+│   ├── router.py         - Smart routing: classify complexity, route to cloud or local
 │   ├── providers.py      - Claude + OpenAI-compatible provider chain with fallback
 │   ├── channels.py       - Telegram (webhook + polling fallback) + WhatsApp (webhook)
 │   ├── tools.py          - Shell executor + web page fetcher
 │   └── security.py       - Allowlist, blocklist, rate limiting, secret protection
 ├── tests/
-│   └── test_picoagent.py - 48 tests
+│   └── test_picoagent.py - 70 tests
 ├── CLAUDE.md             - Project context and conventions
 ├── config.example.yaml   - Annotated config template
 ├── Dockerfile            - python:3.11-slim, non-root user, /data volume

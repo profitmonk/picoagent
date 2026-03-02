@@ -13,6 +13,7 @@ from .agent import Agent
 from .channels import TelegramChannel, WhatsAppChannel
 from .memory import Memory
 from .providers import ProviderChain
+from .router import SmartRouter
 from .security import SecurityGate
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -49,10 +50,19 @@ def load_config() -> dict:
 async def run():
     cfg = load_config()
     security = SecurityGate.from_config(cfg)
-    providers = ProviderChain.from_config(cfg)
+
+    # Use smart routing if local providers are configured alongside cloud
+    has_local = any(p["type"] in ("ollama", "vllm", "local") for p in cfg.get("providers", []))
+    if has_local:
+        router = SmartRouter.from_config(cfg)
+        log.info("Smart routing enabled (cloud + local)")
+    else:
+        router = ProviderChain.from_config(cfg)
+        log.info("Cloud-only mode (no local providers)")
+
     db_path = cfg.get("memory", {}).get("db_path", "/data/picoagent.db")
     memory = Memory(db_path)
-    agent = Agent(providers, security, memory)
+    agent = Agent(router, security, memory)
 
     channels = []
     stop_fns = []
