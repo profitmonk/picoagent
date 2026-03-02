@@ -1,100 +1,239 @@
 # Picoagent
 
-Lightweight, secure AI agent (~750 lines of Python) that routes messages from Telegram and WhatsApp to cloud AI (Claude, ChatGPT) or local models (Ollama, vLLM), with shell execution and web browsing capabilities. Persistent conversation memory via SQLite. Runs in a Docker container on Mac or Raspberry Pi.
+Lightweight, secure AI agent (~940 lines of Python) that smart-routes messages from Telegram and WhatsApp to **Claude** (cloud) or **Ollama** (local) based on message complexity. Includes shell execution, web browsing, and persistent conversation memory. Runs in a locked-down Docker container on Mac or Raspberry Pi.
 
-## Architecture
+## How It Works
+
+You send a message to your Telegram bot. The message flows through an ngrok tunnel into a Docker container running Picoagent. A regex-based router classifies the message as simple, complex, or tool-requiring, and sends it to either a local Ollama model (free, fast) or Claude (powerful, paid). The response comes back to your Telegram chat.
 
 ```
-You (Telegram)
+You (Telegram app)
      |
-Telegram servers
-     |  HTTPS POST (instant)
-ngrok tunnel (public URL)
+     v
+Telegram servers (cloud)
      |
+     |  HTTPS POST (webhook, instant delivery)
+     v
+ngrok tunnel (public URL → localhost:8443)
+     |
+     v
 Docker container (picoagent)
      |
-Agent (ReAct Loop) --> SecurityGate
-     |                       \
-SmartRouter               Memory (SQLite)
-  /       \
-Cloud     Local + Shell + Web
-(Claude)  (Ollama)
+     v
+SecurityGate ──→ reject if not in allowlist / rate limited
+     |
+     v
+Agent (ReAct loop, max 5 tool rounds)
+     |
+     v
+SmartRouter (regex classifier, zero-latency)
+     |
+     ├── "simple" ──→ Ollama (llama3.2, 3B, runs on your Mac)
+     |                    └── if fails → auto-escalate to Claude
+     |
+     ├── "complex" ──→ Claude (claude-sonnet via Anthropic API)
+     |
+     └── "tool" ──→ Claude (needs function calling)
+                        ├── shell tool (run commands in container)
+                        └── web_fetch tool (fetch web pages)
+     |
+     v
+Memory (SQLite in Docker volume, 20-msg sliding window per user)
+     |
+     v
+Reply sent back to Telegram
 ```
 
-- **Smart routing** — classifies messages and routes simple queries to Ollama (free/fast), complex ones to Claude (quality), with auto-escalation
-- **Webhook mode** — Telegram pushes messages instantly via ngrok tunnel (polling fallback available)
-- **Persistent memory** — SQLite-backed conversation history survives container restarts
-- **ReAct loop** with per-user conversation memory (20-message sliding window)
-- **Provider chain** with automatic fallback (Claude -> OpenAI -> local)
-- **Docker-only execution** — refuses to start outside a container
-- **6-layer security**: user allowlist, rate limiting, command blocklist, secret exfiltration prevention, container isolation, execution limits
+## Smart Router
 
-## Quick Start
+The router classifies every message **before** any LLM call using pure regex pattern matching — zero latency, zero cost.
+
+### Classification Logic
+
+| Classification | What Triggers It | Routed To | Example |
+|---------------|-----------------|-----------|---------|
+| **tool** | Words like `run`, `execute`, `shell`, `directory`, `file`, `fetch`, `install` | Claude | "what directory am I in?" |
+| **complex** | `explain`, `analyze`, `write code`, `debug`, code blocks, `step by step`, `architecture`, `api`, `docker`, or messages >50 words | Claude | "write a Python sort function" |
+| **simple** | Greetings, thanks, yes/no, jokes, definitions, short messages (<=5 words) with no complex signals | Ollama | "hello", "tell me a joke" |
+
+The classifier uses a **scoring system**: each matching regex adds +1 to either a complex or simple score. Long messages and multi-line messages add to the complex score. If in doubt, it defaults to Claude (the safer choice).
+
+### Auto-Escalation
+
+If Ollama fails (connection refused, timeout) or returns an empty response, the request automatically escalates to Claude. The user never sees an error — routing is invisible.
+
+### Why Not Use an LLM to Classify?
+
+The regex classifier runs in **microseconds**. An LLM-based classifier would add 200-500ms latency to every single message just for routing. The regex approach is good enough for the routing decision and keeps things instant.
+
+## Models
+
+### Cloud: Claude (Anthropic)
+
+| Property | Value |
+|----------|-------|
+| Model | `claude-sonnet-4-20250514` (configurable) |
+| Provider | Anthropic API |
+| Strengths | Code generation, complex reasoning, tool use (function calling) |
+| Cost | Pay-per-token via Anthropic API |
+| Used for | Complex queries, tool calls, code, analysis |
+
+### Local: Ollama (llama3.2)
+
+| Property | Value |
+|----------|-------|
+| Model | `llama3.2` — Meta's Llama 3.2, 3B parameters |
+| Size | 2.0 GB on disk |
+| Source | Downloaded from [ollama.com/library](https://ollama.com/library) (pre-quantized GGUF) |
+| Runs on | Your Mac/Pi via Ollama, served on `localhost:11434` |
+| Strengths | Fast responses (~100ms), free, fully private |
+| Cost | Zero — runs entirely on your hardware |
+| Used for | Greetings, simple chat, basic Q&A, jokes |
+
+**Alternative local models** (change `model` in config.yaml):
+
+| Model | Size | Notes |
+|-------|------|-------|
+| `llama3.2` (default) | 2 GB | Fastest, good for simple chat |
+| `llama3.1:8b` | 4.7 GB | Better quality, slower |
+| `mistral` | 4.1 GB | Good balance of speed and quality |
+| `gemma2:9b` | 5.4 GB | Strong reasoning for its size |
+
+## Security (6 Layers)
+
+| Layer | What It Does | Details |
+|-------|-------------|---------|
+| **Docker-only execution** | Refuses to start outside a container | Checks for `/.dockerenv` at startup |
+| **User allowlist** | Only your Telegram ID can use the bot | Per-channel allowlists in config.yaml |
+| **Rate limiting** | 20 messages/user/minute | Sliding window, configurable |
+| **Command blocklist** | Blocks dangerous shell commands | `rm -rf`, `sudo`, `mkfs`, `dd`, `curl\|sh`, `chmod 777`, `shutdown`, `nc -e` |
+| **Secret exfiltration prevention** | Blocks attempts to read API keys | `env`, `printenv`, `cat .env`, `$API_KEY`, `$TOKEN`, `/proc/*/environ` |
+| **Container isolation** | Locked-down Docker container | Non-root user, all capabilities dropped, 50 PID limit, 512MB memory, no privilege escalation |
+
+## Tools
+
+The agent can use two tools via the ReAct loop (Claude only — local models don't get tools):
+
+| Tool | Description | Limits |
+|------|-------------|--------|
+| `shell` | Execute shell commands inside the container | 30s timeout, 4000 char output, blocked commands rejected |
+| `web_fetch` | Fetch web page content as text | 15s timeout, 4000 char output |
+
+The ReAct loop allows up to **5 tool rounds** per message. The LLM calls a tool, observes the result, and decides whether to call another tool or respond.
+
+## Persistent Memory
+
+Conversation history is stored in SQLite inside a Docker named volume:
+
+```
+Docker volume: picoagent_picoagent-data
+  └── /data/picoagent.db
+       └── messages table (conv_key, role, content, tool_calls, timestamp)
+```
+
+- **Survives** container restarts and image rebuilds
+- **20-message sliding window** per user (older messages trimmed)
+- **Isolated** inside Docker — not directly accessible from the host
+- **Wipe** with: `./stop.sh --wipe`
+
+---
+
+## Build Your Own Picoagent (Step by Step)
 
 ### Prerequisites
-- [Docker Desktop](https://www.docker.com/products/docker-desktop/)
-- [ngrok](https://ngrok.com/) (free account) — `brew install ngrok`
-- A Telegram bot token from [@BotFather](https://t.me/botfather)
-- An Anthropic API key from [console.anthropic.com](https://console.anthropic.com)
-- [Ollama](https://ollama.com/) (optional, for smart routing) — `brew install ollama`
 
-### Setup
+You need these installed on your Mac (or Linux/Pi):
+
+| Tool | Install | What It's For |
+|------|---------|---------------|
+| **Docker Desktop** | [docker.com/products/docker-desktop](https://www.docker.com/products/docker-desktop/) | Runs Picoagent in a secure container |
+| **ngrok** | `brew install ngrok` | Tunnels Telegram webhooks to your local machine |
+| **Ollama** | `brew install ollama` | Runs local LLM (llama3.2) for simple queries |
+| **Git** | Pre-installed on Mac | Clone the repository |
+
+You also need these accounts/keys:
+
+| Account | Where to Get It | What It's For |
+|---------|----------------|---------------|
+| **Telegram bot token** | [@BotFather](https://t.me/botfather) on Telegram | Your bot's identity |
+| **Your Telegram user ID** | [@userinfobot](https://t.me/userinfobot) on Telegram | Allowlist (only you can use the bot) |
+| **Anthropic API key** | [console.anthropic.com](https://console.anthropic.com) | Claude API access |
+| **ngrok account** | [ngrok.com](https://ngrok.com/) (free tier works) | Authenticate ngrok |
+
+### Step 1: Create Your Telegram Bot
+
+1. Open Telegram and search for **@BotFather**
+2. Send `/newbot`
+3. Choose a name (e.g., "My Picoagent")
+4. Choose a username (must end in `bot`, e.g., `my_picoagent_bot`)
+5. BotFather gives you a **bot token** like `8267213402:AAG...DrA` — save this
+
+### Step 2: Get Your Telegram User ID
+
+1. Open Telegram and search for **@userinfobot**
+2. Send any message
+3. It replies with your **user ID** (a number like `1015155520`) — save this
+
+### Step 3: Get Your Anthropic API Key
+
+1. Go to [console.anthropic.com](https://console.anthropic.com)
+2. Sign up / log in
+3. Go to **API Keys** and create a new key
+4. Save the key (starts with `sk-ant-...`)
+
+### Step 4: Set Up ngrok
+
+1. Go to [ngrok.com](https://ngrok.com/) and create a free account
+2. Get your auth token from the ngrok dashboard
+3. Run:
+```bash
+ngrok config add-authtoken YOUR_NGROK_AUTH_TOKEN
+```
+
+### Step 5: Install and Start Ollama
 
 ```bash
-# 1. Clone
+# Install
+brew install ollama
+
+# Start the server
+ollama serve &
+
+# Pull the model (2 GB download)
+ollama pull llama3.2
+
+# Verify it works
+curl -s http://localhost:11434/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"llama3.2","messages":[{"role":"user","content":"say hi"}]}'
+```
+
+### Step 6: Clone and Configure Picoagent
+
+```bash
+# Clone the repo
 git clone https://github.com/profitmonk/picoagent.git
 cd picoagent
 
-# 2. Create .env with your secrets
+# Create .env with your secrets
 cat > .env << 'EOF'
 ANTHROPIC_API_KEY=sk-ant-your-key-here
 TELEGRAM_BOT_TOKEN=your-bot-token-here
 TELEGRAM_WEBHOOK_URL=
 EOF
 
-# 3. Create config.yaml
+# Create config.yaml from the template
 cp config.example.yaml config.yaml
-# Edit config.yaml — set your Telegram user ID in the allowlist
-
-# 4. Start everything
-./start.sh
 ```
 
-### Daily usage
+Now edit **config.yaml** — replace `123456789` with your Telegram user ID:
 
-```bash
-./start.sh           # Start ngrok + Docker (one command)
-./stop.sh            # Stop everything, keep conversation history
-./stop.sh --wipe     # Stop everything + delete all conversation history
-```
-
-### Manage the container
-
-```bash
-docker compose ps          # Check status
-docker compose logs -f     # Watch live logs
-docker compose down        # Stop container only
-```
-
-## Configuration
-
-Secrets go in `.env` (never committed to git). Config references them with `${VAR}`:
-
-**.env**
-```
-ANTHROPIC_API_KEY=sk-ant-...
-TELEGRAM_BOT_TOKEN=123456:ABC...
-TELEGRAM_WEBHOOK_URL=https://your-tunnel.ngrok-free.dev
-```
-
-**config.yaml**
 ```yaml
 providers:
   - type: claude
     api_key: "${ANTHROPIC_API_KEY}"
     model: "claude-sonnet-4-20250514"
 
-  # Add Ollama for smart routing (simple queries handled locally for free)
   - type: ollama
     base_url: "http://host.docker.internal:11434/v1"
     model: "llama3.2"
@@ -107,94 +246,137 @@ telegram:
 security:
   allowlist:
     telegram:
-      - 123456789  # your Telegram user ID (get from @userinfobot)
+      - YOUR_TELEGRAM_USER_ID    # <-- replace this
   rate_limit: 20
   rate_window: 60
 ```
 
-## Smart Routing
-
-When both cloud (Claude) and local (Ollama) providers are configured, the agent uses intelligent routing:
-
-| Message Type | Example | Routed To | Why |
-|-------------|---------|-----------|-----|
-| Greetings & simple chat | "hello", "thanks", "yes" | Ollama (local) | Free, fast, no API cost |
-| Factual Q&A | "tell me a joke", "define entropy" | Ollama (local) | Simple enough for local model |
-| Code/analysis | "write a Python sort function" | Claude (cloud) | Needs strong reasoning |
-| Tool use | "what directory am I in?" | Claude (cloud) | Requires function calling |
-| Complex reasoning | "explain async/await step by step" | Claude (cloud) | Needs depth and accuracy |
-
-**Auto-escalation**: If Ollama fails or returns empty, the request automatically escalates to Claude.
-
-**Setup**: Install Ollama (`brew install ollama`), pull a model (`ollama pull llama3.2`), start it (`ollama serve`), and add the Ollama provider to your config.yaml. The router activates automatically when local providers are present.
-
-## Tools
-
-The agent can use two tools via the ReAct loop:
-
-| Tool | Description | Limits |
-|------|-------------|--------|
-| `shell` | Execute shell commands inside the container | 30s timeout, 4000 char output, dangerous commands blocked |
-| `web_fetch` | Fetch web page content | 15s timeout, 4000 char output |
-
-## Security
-
-| Layer | Protection |
-|-------|-----------|
-| Docker-only execution | Refuses to start outside a container |
-| User allowlist | Per-channel allowlists (Telegram IDs, WhatsApp numbers) |
-| Rate limiting | 20 messages/user/minute (configurable) |
-| Command blocklist | Blocks `rm -rf`, `sudo`, `mkfs`, `dd`, `curl\|sh`, etc. |
-| Secret exfiltration prevention | Blocks `env`, `printenv`, `cat .env`, `$API_KEY`, `/proc/*/environ` |
-| Container isolation | Non-root user, all capabilities dropped, 50 PID limit, 512MB memory |
-| Execution limits | 30s shell timeout, 4000 char truncation, max 5 tool rounds |
-
-## Persistent Memory
-
-Conversation history is stored in SQLite inside a Docker named volume:
-
-```
-Docker volume: picoagent_picoagent-data
-  └── /data/picoagent.db
-       └── messages (conv_key, role, content, tool_calls, timestamp)
-```
-
-- Survives container restarts and rebuilds
-- 20-message sliding window per user
-- Isolated inside Docker — not accessible from the host filesystem
-- Wipe with: `./stop.sh --wipe`
-
-## Tests
+### Step 7: Start Everything
 
 ```bash
-pip install -r requirements.txt
-python -m pytest tests/ -v    # 70 tests covering all modules
+./start.sh
 ```
+
+This single command:
+1. Starts an ngrok tunnel to port 8443
+2. Updates `.env` with the new ngrok URL
+3. Builds the Docker image and starts the container
+4. Registers the webhook with Telegram
+
+You should see:
+
+```
+=== Picoagent Running ===
+Tunnel:    https://xxxx.ngrok-free.dev
+Container: Up 3 seconds (healthy)
+```
+
+### Step 8: Test It
+
+Open Telegram and send messages to your bot:
+
+| Test | Send This | Expected |
+|------|-----------|----------|
+| Simple (Ollama) | `hello` | Fast reply from local model |
+| Complex (Claude) | `explain how Docker works` | Detailed reply from Claude |
+| Tool use (Claude) | `what directory are you in?` | Calls `pwd`, returns `/home/agent/app` |
+| Security | `cat .env` | Blocked by security policy |
+| Web fetch | `what's on example.com?` | Fetches and summarizes the page |
+
+Watch the logs in another terminal:
+```bash
+docker compose logs -f
+```
+
+You'll see lines like:
+```
+Router: complexity=simple for: hello...
+Router: handled locally
+Router: complexity=complex for: explain how Docker works...
+Router: complexity=tool for: what directory are you in?...
+```
+
+### Daily Usage
+
+```bash
+./start.sh           # Start ngrok + Docker (one command)
+./stop.sh            # Stop everything, keep conversation history
+./stop.sh --wipe     # Stop everything + delete all conversation history
+```
+
+### Managing the Container
+
+```bash
+docker compose ps          # Check status
+docker compose logs -f     # Watch live logs
+docker compose down        # Stop container only
+docker compose up -d       # Restart container only (no ngrok)
+```
+
+---
 
 ## Project Structure
 
 ```
 picoagent/
-├── picoagent/
-│   ├── __init__.py       - Version string
-│   ├── main.py           - Config loading, .env support, Docker enforcement, startup
-│   ├── agent.py          - ReAct loop, tool dispatch, uses Memory for persistence
-│   ├── memory.py         - SQLite-backed conversation store (save/load/trim)
-│   ├── router.py         - Smart routing: classify complexity, route to cloud or local
-│   ├── providers.py      - Claude + OpenAI-compatible provider chain with fallback
-│   ├── channels.py       - Telegram (webhook + polling fallback) + WhatsApp (webhook)
-│   ├── tools.py          - Shell executor + web page fetcher
-│   └── security.py       - Allowlist, blocklist, rate limiting, secret protection
+├── picoagent/                    # Core Python package (940 lines)
+│   ├── __init__.py        (2)   - Package version string
+│   ├── main.py          (129)   - Config loading, .env → ${VAR} substitution, Docker enforcement, startup
+│   ├── agent.py          (92)   - ReAct loop: LLM → tool call → observe → repeat (max 5 rounds)
+│   ├── router.py        (181)   - Smart routing: regex classifier + SmartRouter (cloud/local dispatch)
+│   ├── providers.py     (148)   - ClaudeProvider + OpenAICompatibleProvider + ProviderChain (fallback)
+│   ├── channels.py      (153)   - TelegramChannel (webhook + polling) + WhatsAppChannel (webhook)
+│   ├── memory.py         (80)   - SQLite conversation store: save/load/trim (20-msg window)
+│   ├── tools.py          (76)   - Shell executor (30s timeout) + web fetcher (15s timeout)
+│   └── security.py       (81)   - SecurityGate: allowlist, rate limit, command blocklist, secret protection
 ├── tests/
-│   └── test_picoagent.py - 70 tests
-├── CLAUDE.md             - Project context and conventions
-├── config.example.yaml   - Annotated config template
-├── Dockerfile            - python:3.11-slim, non-root user, /data volume
-├── docker-compose.yml    - Security constraints, named volume for persistence
-├── requirements.txt      - pyyaml, aiohttp, python-telegram-bot, anthropic, openai
-├── start.sh              - Launch ngrok + Docker in one command
-└── stop.sh               - Tear down everything (--wipe to delete history)
+│   └── test_picoagent.py (556)  - 70 tests: security, tools, providers, memory, agent, router, config
+├── config.example.yaml          - Annotated config template (copy to config.yaml)
+├── Dockerfile                   - python:3.11-slim, non-root user, curl/wget/jq/git, /data volume
+├── docker-compose.yml           - Security: cap_drop ALL, pids 50, mem 512m, host.docker.internal
+├── requirements.txt             - pyyaml, aiohttp, python-telegram-bot, anthropic, openai
+├── start.sh                     - One-command launch: ngrok tunnel + Docker build + start
+├── stop.sh                      - Teardown: Docker + ngrok (--wipe to delete history)
+└── CLAUDE.md                    - Project conventions for AI assistants
 ```
+
+### How the Files Connect
+
+```
+main.py
+  ├── loads .env → os.environ
+  ├── loads config.yaml (resolves ${VAR} references)
+  ├── creates SecurityGate (from config allowlist/rates)
+  ├── creates SmartRouter or ProviderChain (auto-detects local providers)
+  ├── creates Memory (SQLite at /data/picoagent.db)
+  ├── creates Agent (wires router + security + memory)
+  └── creates TelegramChannel (wires agent, starts webhook listener)
+
+TelegramChannel (channels.py)
+  └── on message → agent.handle_message(user_id, channel, text)
+
+Agent (agent.py)
+  ├── security.authorize() → reject if not allowed
+  ├── memory.save() → persist user message
+  ├── router.complete(messages, tools) → get LLM response
+  │     ├── classify(text) → "simple" / "complex" / "tool"
+  │     ├── simple → Ollama (local, free) → fallback to Claude if fails
+  │     └── complex/tool → Claude (cloud, paid)
+  ├── if tool_calls → execute tools → save results → loop (max 5)
+  └── memory.save() → persist assistant reply
+```
+
+## Tests
+
+```bash
+# Install dependencies (needed for running tests outside Docker)
+pip install -r requirements.txt
+
+# Run all 70 tests
+python -m pytest tests/ -v
+```
+
+Tests cover: security allowlist/blocklist/rate limiting, shell tool execution/timeout/truncation, provider chain config/fallback, SQLite memory persistence/trimming, agent ReAct loop/tool dispatch/security enforcement, router classification/routing/escalation, and config loading.
 
 ## License
 
