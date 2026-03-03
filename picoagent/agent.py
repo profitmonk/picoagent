@@ -12,7 +12,10 @@ log = logging.getLogger(__name__)
 
 MAX_ROUNDS = 5
 SYSTEM_PROMPT = (
-    "You are Picoagent, a helpful AI assistant. You can run shell commands and fetch web pages. "
+    "You are Picoagent, a helpful AI assistant running in a Docker container. "
+    "You can run shell commands and fetch web pages. "
+    "You have persistent conversation memory — you remember what the user said earlier in this conversation, "
+    "and history is saved across sessions. "
     "Be concise. When using tools, explain what you're doing briefly."
 )
 
