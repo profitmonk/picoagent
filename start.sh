@@ -11,9 +11,16 @@ echo "=== Picoagent Startup ==="
 pkill ngrok 2>/dev/null || true
 docker compose down 2>/dev/null || true
 
+# Load NGROK_DOMAIN from .env if set
+NGROK_DOMAIN=$(grep -s '^NGROK_DOMAIN=' .env | cut -d= -f2- | tr -d '"' | tr -d "'")
+
 # Start ngrok in background
 echo "[1/3] Starting ngrok tunnel..."
-ngrok http 8443 --log=stdout > /dev/null 2>&1 &
+if [ -n "$NGROK_DOMAIN" ]; then
+    ngrok http 8443 --domain="$NGROK_DOMAIN" --log=stdout > /dev/null 2>&1 &
+else
+    ngrok http 8443 --log=stdout > /dev/null 2>&1 &
+fi
 NGROK_PID=$!
 
 # Wait for ngrok to be ready
@@ -46,6 +53,7 @@ sleep 3
 echo ""
 echo "=== Picoagent Running ==="
 echo "Tunnel:    $NGROK_URL"
+echo "Web Chat:  $NGROK_URL  (open in browser)"
 echo "ngrok PID: $NGROK_PID"
 echo "Container: $(docker compose ps --format '{{.Status}}')"
 echo ""

@@ -34,6 +34,10 @@ whatsapp:
   phone_number_id: ""              # Your WhatsApp phone number ID
   port: 8080                       # Webhook listener port
 
+# --- Web Chat (browser-based, password-protected) ---
+webchat:
+  password: "${WEBCHAT_PASSWORD}"    # Set WEBCHAT_PASSWORD in .env
+
 # --- Security ---
 security:
   # Per-channel allowlists (empty = open to all)

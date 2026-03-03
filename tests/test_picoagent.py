@@ -552,5 +552,145 @@ class TestConfigLoading(unittest.TestCase):
         self.assertIsNotNone(router.local)
 
 
+# ── Web chat tests ─────────────────────────────────────────────
+
+from aiohttp import web
+from picoagent.webchat import WebChatChannel
+
+
+def _make_webchat_app(password="testpass", mock_chain=None):
+    """Helper to create a test aiohttp app with webchat routes."""
+    if mock_chain is None:
+        mock_chain = AsyncMock()
+        mock_chain.complete = AsyncMock(return_value=LLMResponse(text="bot reply"))
+    security = SecurityGate.from_config({})
+    mem = Memory(":memory:")
+    agent = Agent(mock_chain, security, mem)
+    app = web.Application()
+    channel = WebChatChannel(password=password, agent=agent)
+    channel.register_routes(app)
+    return app, channel
+
+
+class TestWebChatLogin(unittest.TestCase):
+    def test_correct_password_returns_200(self):
+        from aiohttp.test_utils import TestClient, TestServer
+        app, _ = _make_webchat_app("secret123")
+
+        async def _test():
+            async with TestClient(TestServer(app)) as client:
+                resp = await client.post("/api/login", json={"password": "secret123"})
+                self.assertEqual(resp.status, 200)
+                data = await resp.json()
+                self.assertTrue(data["ok"])
+                # Session cookie should be set
+                self.assertIn("session", {c.key for c in client.session.cookie_jar})
+
+        asyncio.run(_test())
+
+    def test_wrong_password_returns_401(self):
+        from aiohttp.test_utils import TestClient, TestServer
+        app, _ = _make_webchat_app("secret123")
+
+        async def _test():
+            async with TestClient(TestServer(app)) as client:
+                resp = await client.post("/api/login", json={"password": "wrong"})
+                self.assertEqual(resp.status, 401)
+
+        asyncio.run(_test())
+
+    def test_empty_password_returns_401(self):
+        from aiohttp.test_utils import TestClient, TestServer
+        app, _ = _make_webchat_app("secret123")
+
+        async def _test():
+            async with TestClient(TestServer(app)) as client:
+                resp = await client.post("/api/login", json={"password": ""})
+                self.assertEqual(resp.status, 401)
+
+        asyncio.run(_test())
+
+
+class TestWebChatSession(unittest.TestCase):
+    def test_chat_without_login_returns_401(self):
+        from aiohttp.test_utils import TestClient, TestServer
+        app, _ = _make_webchat_app()
+
+        async def _test():
+            async with TestClient(TestServer(app)) as client:
+                resp = await client.post("/api/chat", json={"message": "hello"})
+                self.assertEqual(resp.status, 401)
+
+        asyncio.run(_test())
+
+    def test_history_without_login_returns_401(self):
+        from aiohttp.test_utils import TestClient, TestServer
+        app, _ = _make_webchat_app()
+
+        async def _test():
+            async with TestClient(TestServer(app)) as client:
+                resp = await client.get("/api/history")
+                self.assertEqual(resp.status, 401)
+
+        asyncio.run(_test())
+
+    def test_chat_after_login_returns_reply(self):
+        from aiohttp.test_utils import TestClient, TestServer
+        app, _ = _make_webchat_app("pass")
+
+        async def _test():
+            async with TestClient(TestServer(app)) as client:
+                await client.post("/api/login", json={"password": "pass"})
+                resp = await client.post("/api/chat", json={"message": "hello"})
+                self.assertEqual(resp.status, 200)
+                data = await resp.json()
+                self.assertEqual(data["reply"], "bot reply")
+
+        asyncio.run(_test())
+
+    def test_history_after_chat_returns_messages(self):
+        from aiohttp.test_utils import TestClient, TestServer
+        app, _ = _make_webchat_app("pass")
+
+        async def _test():
+            async with TestClient(TestServer(app)) as client:
+                await client.post("/api/login", json={"password": "pass"})
+                await client.post("/api/chat", json={"message": "hi"})
+                resp = await client.get("/api/history")
+                self.assertEqual(resp.status, 200)
+                data = await resp.json()
+                roles = [m["role"] for m in data["messages"]]
+                self.assertIn("user", roles)
+                self.assertIn("assistant", roles)
+
+        asyncio.run(_test())
+
+    def test_logout_invalidates_session(self):
+        from aiohttp.test_utils import TestClient, TestServer
+        app, _ = _make_webchat_app("pass")
+
+        async def _test():
+            async with TestClient(TestServer(app)) as client:
+                await client.post("/api/login", json={"password": "pass"})
+                await client.post("/api/logout")
+                resp = await client.post("/api/chat", json={"message": "hello"})
+                self.assertEqual(resp.status, 401)
+
+        asyncio.run(_test())
+
+    def test_ui_page_loads(self):
+        from aiohttp.test_utils import TestClient, TestServer
+        app, _ = _make_webchat_app()
+
+        async def _test():
+            async with TestClient(TestServer(app)) as client:
+                resp = await client.get("/")
+                self.assertEqual(resp.status, 200)
+                text = await resp.text()
+                self.assertIn("Picoagent", text)
+
+        asyncio.run(_test())
+
+
 if __name__ == "__main__":
     unittest.main()

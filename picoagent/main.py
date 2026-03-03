@@ -9,12 +9,15 @@ import sys
 
 import yaml
 
+from aiohttp import web
+
 from .agent import Agent
 from .channels import TelegramChannel, WhatsAppChannel
 from .memory import Memory
 from .providers import ProviderChain
 from .router import SmartRouter
 from .security import SecurityGate
+from .webchat import WebChatChannel
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -66,6 +69,16 @@ async def run():
 
     channels = []
     stop_fns = []
+    shared_app = None
+    shared_runner = None
+
+    # Web chat — creates shared aiohttp app if configured
+    wc = cfg.get("webchat", {})
+    if wc.get("password"):
+        shared_app = web.Application()
+        webchat = WebChatChannel(password=wc["password"], agent=agent)
+        webchat.register_routes(shared_app)
+        log.info("Web chat enabled")
 
     # Telegram
     tg = cfg.get("telegram", {})
@@ -75,7 +88,11 @@ async def run():
             agent=agent,
             webhook_url=tg.get("webhook_url"),
             port=tg.get("webhook_port", 8443),
+            shared_app=shared_app,
         )
+        # Register webhook route on shared app before it's frozen by AppRunner
+        if shared_app and tg.get("webhook_url"):
+            ch.register_webhook(shared_app)
         channels.append(ch.start())
         stop_fns.append(ch.stop)
 
@@ -92,12 +109,23 @@ async def run():
         channels.append(ch.start())
         stop_fns.append(ch.stop)
 
-    if not channels:
-        log.error("No channels configured. Set telegram.token or whatsapp.access_token in config.")
+    if not channels and not shared_app:
+        log.error("No channels configured. Set telegram.token, whatsapp.access_token, or webchat.password in config.")
         sys.exit(1)
 
-    log.info("Picoagent starting with %d channel(s)...", len(channels))
-    await asyncio.gather(*channels)
+    # Start shared aiohttp app (webchat + telegram webhook on same port)
+    if shared_app:
+        port = tg.get("webhook_port", 8443)
+        shared_runner = web.AppRunner(shared_app)
+        await shared_runner.setup()
+        site = web.TCPSite(shared_runner, "0.0.0.0", port)
+        await site.start()
+        log.info("Shared HTTP server on port %d (webchat%s)", port,
+                 " + telegram webhook" if tg.get("token") and tg.get("webhook_url") else "")
+
+    log.info("Picoagent starting with %d channel(s)...", len(channels) + (1 if shared_app else 0))
+    if channels:
+        await asyncio.gather(*channels)
 
     # Keep running until interrupted
     stop = asyncio.Event()
@@ -109,6 +137,8 @@ async def run():
     log.info("Shutting down...")
     for fn in stop_fns:
         await fn()
+    if shared_runner:
+        await shared_runner.cleanup()
 
 
 def _require_container():

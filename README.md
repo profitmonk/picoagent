@@ -1,20 +1,23 @@
 # Picoagent
 
-Lightweight, secure AI agent (~940 lines of Python) that smart-routes messages from Telegram and WhatsApp to **Claude** (cloud) or **Ollama** (local) based on message complexity. Includes shell execution, web browsing, and persistent conversation memory. Runs in a locked-down Docker container on Mac or Raspberry Pi.
+Lightweight, secure AI agent (~1100 lines of Python) that smart-routes messages from Telegram, WhatsApp, and a **password-protected web chat** to **Claude** (cloud) or **Ollama** (local) based on message complexity. Includes shell execution, web browsing, and persistent conversation memory. Runs in a locked-down Docker container on Mac or Raspberry Pi.
 
 ## How It Works
 
-You send a message to your Telegram bot. The message flows through an ngrok tunnel into a Docker container running Picoagent. A regex-based router classifies the message as simple, complex, or tool-requiring, and sends it to either a local Ollama model (free, fast) or Claude (powerful, paid). The response comes back to your Telegram chat.
+You send a message via Telegram, WhatsApp, or the **web chat UI** (accessible from any browser). The message flows through an ngrok tunnel into a Docker container running Picoagent. A regex-based router classifies the message as simple, complex, or tool-requiring, and sends it to either a local Ollama model (free, fast) or Claude (powerful, paid). The response comes back through the same channel.
 
 ```
-You (Telegram app)
+You (Telegram / WhatsApp / Browser)
      |
      v
-Telegram servers (cloud)
+ngrok tunnel (HTTPS → localhost:8443, single shared port)
      |
-     |  HTTPS POST (webhook, instant delivery)
-     v
-ngrok tunnel (public URL → localhost:8443)
+     ├── POST /telegram/{id}  → Telegram webhook
+     ├── GET  /               → Web chat UI (login page)
+     ├── POST /api/login      → Password auth → session cookie
+     ├── POST /api/chat       → Web chat messages
+     ├── GET  /api/history    → Load conversation from SQLite
+     └── POST /api/logout     → Invalidate session
      |
      v
 Docker container (picoagent)
@@ -41,7 +44,7 @@ SmartRouter (regex classifier, zero-latency)
 Memory (SQLite in Docker volume, 20-msg sliding window per user)
      |
      v
-Reply sent back to Telegram
+Reply sent back to Telegram / WhatsApp / Browser
 ```
 
 ## Smart Router
@@ -104,11 +107,46 @@ The regex classifier runs in **microseconds**. An LLM-based classifier would add
 | Layer | What It Does | Details |
 |-------|-------------|---------|
 | **Docker-only execution** | Refuses to start outside a container | Checks for `/.dockerenv` at startup |
-| **User allowlist** | Only your Telegram ID can use the bot | Per-channel allowlists in config.yaml |
+| **User allowlist** | Only authorized users can use the bot | Per-channel allowlists in config.yaml; web chat uses password auth |
 | **Rate limiting** | 20 messages/user/minute | Sliding window, configurable |
 | **Command blocklist** | Blocks dangerous shell commands | `rm -rf`, `sudo`, `mkfs`, `dd`, `curl\|sh`, `chmod 777`, `shutdown`, `nc -e` |
 | **Secret exfiltration prevention** | Blocks attempts to read API keys | `env`, `printenv`, `cat .env`, `$API_KEY`, `$TOKEN`, `/proc/*/environ` |
 | **Container isolation** | Locked-down Docker container | Non-root user, all capabilities dropped, 50 PID limit, 512MB memory, no privilege escalation |
+
+## Web Chat
+
+A password-protected browser UI that lets you chat with the same agent from anywhere in the world. No app install needed — just open the ngrok URL in any browser.
+
+- **Password auth**: Set `WEBCHAT_PASSWORD` in `.env`, log in via browser
+- **Session cookies**: `HttpOnly; SameSite=Strict`, 24h TTL, in-memory (restart = re-login)
+- **Persistent history**: Conversations stored in SQLite, reload the page and history loads back
+- **Port sharing**: Web chat and Telegram webhook share port 8443 on the same aiohttp server (works with ngrok free tier's single tunnel)
+- **No new dependencies**: Uses stdlib `hashlib`, `secrets`, `uuid` + existing `aiohttp`
+
+### Setup
+
+1. Add to `.env`:
+   ```
+   WEBCHAT_PASSWORD=your-secret-password
+   ```
+
+2. Add to `config.yaml`:
+   ```yaml
+   webchat:
+     password: "${WEBCHAT_PASSWORD}"
+   ```
+
+3. Run `./start.sh` and open the ngrok URL in your browser.
+
+### Static Domain (Optional)
+
+By default, ngrok assigns a random URL on every restart. Claim a free static domain at [dashboard.ngrok.com/domains](https://dashboard.ngrok.com/domains), then add to `.env`:
+
+```
+NGROK_DOMAIN=your-name.ngrok-free.dev
+```
+
+The URL will stay the same across restarts.
 
 ## Tools
 
@@ -220,6 +258,8 @@ cat > .env << 'EOF'
 ANTHROPIC_API_KEY=sk-ant-your-key-here
 TELEGRAM_BOT_TOKEN=your-bot-token-here
 TELEGRAM_WEBHOOK_URL=
+WEBCHAT_PASSWORD=your-secret-password
+# NGROK_DOMAIN=your-name.ngrok-free.dev
 EOF
 
 # Create config.yaml from the template
@@ -242,6 +282,9 @@ telegram:
   token: "${TELEGRAM_BOT_TOKEN}"
   webhook_url: "${TELEGRAM_WEBHOOK_URL}"
   webhook_port: 8443
+
+webchat:
+  password: "${WEBCHAT_PASSWORD}"
 
 security:
   allowlist:
@@ -268,12 +311,13 @@ You should see:
 ```
 === Picoagent Running ===
 Tunnel:    https://xxxx.ngrok-free.dev
+Web Chat:  https://xxxx.ngrok-free.dev  (open in browser)
 Container: Up 3 seconds (healthy)
 ```
 
 ### Step 8: Test It
 
-Open Telegram and send messages to your bot:
+Open the ngrok URL in your browser to use the **web chat**, or send messages to your Telegram bot:
 
 | Test | Send This | Expected |
 |------|-----------|----------|
@@ -319,23 +363,25 @@ docker compose up -d       # Restart container only (no ngrok)
 
 ```
 picoagent/
-├── picoagent/                    # Core Python package (940 lines)
+├── picoagent/                    # Core Python package (~1100 lines)
 │   ├── __init__.py        (2)   - Package version string
-│   ├── main.py          (129)   - Config loading, .env → ${VAR} substitution, Docker enforcement, startup
+│   ├── main.py          (156)   - Config loading, .env → ${VAR} substitution, Docker enforcement, startup
 │   ├── agent.py          (92)   - ReAct loop: LLM → tool call → observe → repeat (max 5 rounds)
 │   ├── router.py        (181)   - Smart routing: regex classifier + SmartRouter (cloud/local dispatch)
 │   ├── providers.py     (148)   - ClaudeProvider + OpenAICompatibleProvider + ProviderChain (fallback)
-│   ├── channels.py      (153)   - TelegramChannel (webhook + polling) + WhatsAppChannel (webhook)
+│   ├── channels.py      (165)   - TelegramChannel (webhook + polling, shared_app support) + WhatsAppChannel
+│   ├── webchat.py       (119)   - WebChatChannel: password auth, session cookies, chat/history API
+│   ├── webchat.html     (200)   - Single-page chat UI: login, message bubbles, history, mobile-responsive
 │   ├── memory.py         (80)   - SQLite conversation store: save/load/trim (20-msg window)
 │   ├── tools.py          (76)   - Shell executor (30s timeout) + web fetcher (15s timeout)
 │   └── security.py       (81)   - SecurityGate: allowlist, rate limit, command blocklist, secret protection
 ├── tests/
-│   └── test_picoagent.py (556)  - 70 tests: security, tools, providers, memory, agent, router, config
+│   └── test_picoagent.py (693)  - 79 tests: security, tools, providers, memory, agent, router, config, webchat
 ├── config.example.yaml          - Annotated config template (copy to config.yaml)
 ├── Dockerfile                   - python:3.11-slim, non-root user, curl/wget/jq/git, /data volume
 ├── docker-compose.yml           - Security: cap_drop ALL, pids 50, mem 512m, host.docker.internal
 ├── requirements.txt             - pyyaml, aiohttp, python-telegram-bot, anthropic, openai
-├── start.sh                     - One-command launch: ngrok tunnel + Docker build + start
+├── start.sh                     - One-command launch: ngrok tunnel (static domain support) + Docker build + start
 ├── stop.sh                      - Teardown: Docker + ngrok (--wipe to delete history)
 └── CLAUDE.md                    - Project conventions for AI assistants
 ```
@@ -350,10 +396,16 @@ main.py
   ├── creates SmartRouter or ProviderChain (auto-detects local providers)
   ├── creates Memory (SQLite at /data/picoagent.db)
   ├── creates Agent (wires router + security + memory)
-  └── creates TelegramChannel (wires agent, starts webhook listener)
+  ├── creates shared aiohttp app (if webchat configured)
+  ├── creates WebChatChannel (registers routes on shared app)
+  ├── creates TelegramChannel (registers webhook on shared app)
+  └── starts single HTTP server on port 8443
+
+WebChatChannel (webchat.py)
+  └── POST /api/chat → agent.handle_message(user_id, "webchat", text)
 
 TelegramChannel (channels.py)
-  └── on message → agent.handle_message(user_id, channel, text)
+  └── POST /telegram/{id} → agent.handle_message(user_id, "telegram", text)
 
 Agent (agent.py)
   ├── security.authorize() → reject if not allowed
@@ -372,11 +424,11 @@ Agent (agent.py)
 # Install dependencies (needed for running tests outside Docker)
 pip install -r requirements.txt
 
-# Run all 70 tests
+# Run all 79 tests
 python -m pytest tests/ -v
 ```
 
-Tests cover: security allowlist/blocklist/rate limiting, shell tool execution/timeout/truncation, provider chain config/fallback, SQLite memory persistence/trimming, agent ReAct loop/tool dispatch/security enforcement, router classification/routing/escalation, and config loading.
+Tests cover: security allowlist/blocklist/rate limiting, shell tool execution/timeout/truncation, provider chain config/fallback, SQLite memory persistence/trimming, agent ReAct loop/tool dispatch/security enforcement, router classification/routing/escalation, config loading, and web chat login/session/chat/history/logout.
 
 ## License
 
