@@ -174,6 +174,50 @@ Docker volume: picoagent_picoagent-data
 - **Isolated** inside Docker — not directly accessible from the host
 - **Wipe** with: `./stop.sh --wipe`
 
+## Use Cases
+
+Picoagent turns any device with a browser or Telegram into a secure terminal to your own AI — here's what people are building with it.
+
+### Personal Productivity
+
+| Use Case | How It Works |
+|----------|-------------|
+| **Morning briefing from bed** | Text your bot "briefing" from Telegram on your phone — it fetches weather, calendar, news via `web_fetch` and summarizes |
+| **Quick captures on the go** | Send ideas, notes, or reminders to the bot from anywhere — persistent memory means nothing is lost |
+| **Research assistant** | "Summarize this paper: [URL]" — Claude fetches and distills while you're in a meeting |
+| **Expense logging** | "Lunch $14.50 with client" — simple messages handled locally by Ollama, zero API cost |
+| **Draft emails and messages** | "Write a polite follow-up to the vendor about delayed shipment" — Claude drafts, you copy-paste |
+
+### Personal & Side Projects
+
+| Use Case | How It Works |
+|----------|-------------|
+| **Code from your phone** | Ask the bot to write, debug, or explain code — then `shell` tool runs it in the container to verify |
+| **Server monitoring** | "Check if my site is up" → `web_fetch` pings your URL; "Show disk usage" → `shell` runs `df -h` |
+| **Learning assistant** | Study a new language or framework — ask questions, get examples, run them live |
+| **Home automation hub** | Expose shell scripts that control your smart home — "turn on the lights" triggers a curl to your Home Assistant API |
+| **Raspberry Pi projects** | Run Picoagent on a Pi — a private AI assistant on $35 hardware, accessible from anywhere |
+
+### Chip Design & Hardware Engineering
+
+| Use Case | How It Works |
+|----------|-------------|
+| **RTL quick checks** | "Does this Verilog have a latch?" — paste a module, Claude analyzes combinational logic and flags issues |
+| **Timing analysis helper** | "Explain this slack violation on the reg2reg path" — describe the scenario, get debugging steps |
+| **Script generation** | "Write a TCL script to report all clock domain crossings" — Claude generates EDA tool scripts (Synopsys, Cadence, Mentor) |
+| **Datasheet lookup** | "Fetch the AXI4 spec summary from ARM" → `web_fetch` grabs it, Claude extracts what you need |
+| **Design review prep** | "List common pitfalls in FIFO design for clock domain crossing" — get a structured checklist from your phone before a review |
+| **Regression triage** | "Run `grep -c FAIL results.log`" → `shell` tool counts failures; follow up with "show me the first 5 failing tests" |
+| **Spice/simulation helper** | "Write a testbench for a 2-stage op-amp with 60dB gain target" — Claude drafts the netlist, you iterate |
+
+### Why These Work on Picoagent
+
+- **Any device** — Phone (Telegram), laptop (browser), tablet — no app install, no IDE required
+- **Smart routing saves money** — Quick questions ("what's AXI burst length?") stay on free local Ollama; complex analysis goes to Claude
+- **Shell + web tools** — Not just chat: fetch URLs, run scripts, parse logs — all from a text message
+- **Security** — 6 layers mean you can expose it to the internet without losing sleep
+- **Persistent memory** — Start a conversation on your phone, continue on your laptop — history follows you
+
 ---
 
 ## Build Your Own Picoagent (Step by Step)
